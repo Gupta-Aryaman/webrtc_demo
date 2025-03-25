@@ -1,0 +1,318 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>WebRTC HTML/JS Client</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+    video { width: 100%; background: #f0f0f0; border: 1px solid #ddd; }
+    button { padding: 8px 16px; margin: 10px 0; background: #4CAF50; color: white; border: none; cursor: pointer; }
+    button:hover { background: #45a049; }
+    #status { margin: 10px 0; padding: 10px; background: #f8f8f8; border-left: 4px solid #2196F3; }
+    #log { 
+      height: 200px; 
+      overflow-y: auto; 
+      background: #f0f0f0; 
+      padding: 10px; 
+      font-family: monospace; 
+      margin-top: 20px;
+      border: 1px solid #ddd;
+    }
+    .error { color: red; }
+    .success { color: green; }
+    .info { color: blue; }
+  </style>
+</head>
+<body>
+  <h1>WebRTC Client</h1>
+  <div id="status">Status: Waiting for connection...</div>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <div>
+    <button id="startPythonClient">Start Python Client</button>
+    <button id="startButton">Start Connection</button>
+    <button id="reconnectButton">Reconnect</button>
+  </div>
+  <div>
+    <label for="videoSource">Video Source:</label>
+    <select id="videoSource">
+      <option value="test_pattern">Test Pattern</option>
+      <option value="0">Camera (First Device)</option>
+      <!-- Add more options as needed -->
+    </select>
+  </div>
+  <div id="log"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const startButton = document.getElementById('startButton');
+    const reconnectButton = document.getElementById('reconnectButton');
+    const startPythonClientButton = document.getElementById('startPythonClient');
+    const videoSourceSelect = document.getElementById('videoSource');
+    const logEl = document.getElementById('log');
+    
+    let ws = null;
+    let pc = null;
+    
+    // Log messages with different levels
+    function log(message, level = 'info') {
+      const timestamp = new Date().toLocaleTimeString();
+      const logMessage = `[${timestamp}] ${message}`;
+      console.log(logMessage);
+      
+      const logEntry = document.createElement('div');
+      logEntry.textContent = logMessage;
+      logEntry.className = level;
+      logEl.appendChild(logEntry);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    
+    // Update status display
+    function updateStatus(message) {
+      statusEl.textContent = `Status: ${message}`;
+      log(message);
+    }
+    
+    // Initialize WebRTC connection
+    function initWebRTC() {
+      // Create a new RTCPeerConnection
+      pc = new RTCPeerConnection({
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' }
+        ]
+      });
+      
+      log('RTCPeerConnection created');
+      
+      // Listen for ICE candidates and send them via signaling
+      pc.onicecandidate = event => {
+        if (event.candidate) {
+          log(`ICE candidate: ${event.candidate.candidate}`);
+          
+          // Format the ICE candidate to be compatible with aiortc
+          const candidateObj = {
+            type: "candidate",
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            candidate: event.candidate.candidate
+          };
+          
+          sendSignalingMessage(candidateObj);
+        }
+      };
+      
+      // Handle incoming tracks from the remote peer
+      pc.ontrack = event => {
+        log('Received remote track', 'success');
+        if (remoteVideo.srcObject !== event.streams[0]) {
+          remoteVideo.srcObject = event.streams[0];
+          log('Set remote video stream', 'success');
+        }
+      };
+      
+      pc.oniceconnectionstatechange = () => {
+        log(`ICE connection state: ${pc.iceConnectionState}`);
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          updateStatus('Connected to Python client');
+        } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
+          updateStatus('Connection failed or disconnected');
+        }
+      };
+      
+      pc.onconnectionstatechange = () => {
+        log(`Connection state: ${pc.connectionState}`);
+      };
+      
+      pc.onsignalingstatechange = () => {
+        log(`Signaling state: ${pc.signalingState}`);
+      };
+      
+      return pc;
+    }
+    
+    // Initialize WebSocket connection
+    function initWebSocket() {
+      if (ws) {
+        // Close existing connection
+        ws.close();
+      }
+      
+      // Connect to the signaling server - updated to use the FastAPI WebSocket endpoint
+      ws = new WebSocket("ws://localhost:8080/ws");
+      log('Connecting to signaling server...');
+      
+      // Send signaling messages over the WebSocket
+      ws.onopen = () => {
+        updateStatus('Connected to signaling server');
+        startButton.disabled = false;
+        reconnectButton.disabled = false;
+      };
+      
+      ws.onerror = (error) => {
+        log(`WebSocket error: ${error}`, 'error');
+        updateStatus('Error connecting to signaling server');
+      };
+      
+      ws.onclose = () => {
+        log('WebSocket connection closed');
+        updateStatus('Disconnected from signaling server');
+        startButton.disabled = true;
+      };
+      
+      // Handle incoming WebSocket messages for signaling
+      ws.onmessage = async (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          log(`Received ${data.type} message`);
+          
+          if (data.type === "offer") {
+            // Received an offer from the Python client
+            log('Processing received offer');
+            
+            // If we don't have a peer connection or it's closed, create a new one
+            if (!pc || pc.connectionState === 'closed') {
+              pc = initWebRTC();
+            }
+            
+            await pc.setRemoteDescription(new RTCSessionDescription(data));
+            log('Set remote description (offer)');
+            
+            // Create a media stream to send back
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+              stream.getTracks().forEach(track => pc.addTrack(track, stream));
+              log('Added local media tracks');
+            } catch (e) {
+              log(`Could not access camera/microphone: ${e.message}`, 'error');
+            }
+            
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            log('Created and set local description (answer)');
+            
+            sendSignalingMessage({
+              type: pc.localDescription.type,
+              sdp: pc.localDescription.sdp
+            });
+          } else if (data.type === "answer") {
+            if (pc) {
+              await pc.setRemoteDescription(new RTCSessionDescription(data));
+              log('Set remote description (answer)');
+            } else {
+              log('Received answer but no peer connection exists', 'error');
+            }
+          } else if (data.type === "candidate") {
+            if (pc) {
+              try {
+                const candidate = new RTCIceCandidate({
+                  sdpMid: data.sdpMid,
+                  sdpMLineIndex: data.sdpMLineIndex,
+                  candidate: data.candidate
+                });
+                
+                await pc.addIceCandidate(candidate);
+                log('Added ICE candidate');
+              } catch (e) {
+                log(`Error adding ICE candidate: ${e.message}`, 'error');
+              }
+            } else {
+              log('Received ICE candidate but no peer connection exists', 'error');
+            }
+          }
+        } catch (e) {
+          log(`Error processing message: ${e.message}`, 'error');
+        }
+      };
+      
+      return ws;
+    }
+    
+    // Send a signaling message
+    function sendSignalingMessage(message) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(message));
+        log(`Sent ${message.type} message`);
+      } else {
+        log('Cannot send message, WebSocket is not open', 'error');
+      }
+    }
+    
+    // Initialize the connections
+    ws = initWebSocket();
+    
+    // Start Python client button handler
+    startPythonClientButton.addEventListener('click', async () => {
+      const videoSource = videoSourceSelect.value;
+      updateStatus(`Starting Python client with source: ${videoSource}...`);
+      
+      try {
+        // Updated to use the FastAPI endpoint (port remains 8080)
+        const response = await fetch(`http://localhost:8080/start_client?source=${encodeURIComponent(videoSource)}`);
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+          updateStatus(`Python client started successfully: ${data.message}`);
+          log('Python client started, waiting for connection...', 'success');
+        } else {
+          updateStatus(`Failed to start Python client: ${data.message}`);
+          log(`Error starting Python client: ${data.message}`, 'error');
+        }
+      } catch (error) {
+        updateStatus(`Error starting Python client: ${error.message}`);
+        log(`Error starting Python client: ${error.message}`, 'error');
+      }
+    });
+    
+    // Start button handler - initiate connection when clicked
+    startButton.addEventListener('click', async () => {
+      startButton.disabled = true;
+      
+      try {
+        // If we don't have a peer connection or it's closed, create a new one
+        if (!pc || pc.connectionState === 'closed') {
+          pc = initWebRTC();
+        }
+        
+        // Get user media and add tracks to the connection
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        log('Added local media tracks');
+        
+        // Create and send offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log('Created and set local description (offer)');
+        
+        sendSignalingMessage({
+          type: pc.localDescription.type,
+          sdp: pc.localDescription.sdp
+        });
+        
+        updateStatus('Sent offer to Python client');
+      } catch (e) {
+        log(`Error starting connection: ${e.message}`, 'error');
+        updateStatus(`Error: ${e.message}`);
+        startButton.disabled = false;
+      }
+    });
+    
+    // Reconnect button handler
+    reconnectButton.addEventListener('click', () => {
+      updateStatus('Reconnecting...');
+      
+      // Close existing peer connection if it exists
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      
+      // Reinitialize WebSocket connection
+      ws = initWebSocket();
+    });
+    
+    // Initially disable the reconnect button
+    reconnectButton.disabled = true;
+  </script>
+</body>
+</html>
