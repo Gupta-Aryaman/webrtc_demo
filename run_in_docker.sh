@@ -22,7 +22,7 @@ docker run -it --rm --network host \
   --user root \
   --entrypoint /bin/bash \
   intel/dlstreamer:latest \
-  -c "cd /home/dlstreamer/webrtc_demo && pip install -r requirements.txt && chmod -R 755 /home/dlstreamer && exec setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups /bin/bash -c 'python python_client.py --model ${MODEL} --model_proc ${MODEL_PROC} --rtsp_url ${RTSP_URL} --server_url ${SERVER_URL}'"
+  -c "cd /home/dlstreamer/webrtc_demo && pip install -r requirements.txt && chmod -R 755 /home/dlstreamer && exec setpriv --reuid=$(id -u) --regid=$(id -g) --init-groups /bin/bash -c 'python python_client.py --model ${MODEL} --model-proc ${MODEL_PROC} --rtsp-url ${RTSP_URL} --server-url ${SERVER_URL}'"
 
 # Note: To run the client separately, use:
-# docker exec -it <container_id> /bin/bash -c "cd /home/dlstreamer/webrtc_demo && python python_client.py --model /home/dlstreamer/models/your_model.xml --model_proc /home/dlstreamer/models/your_model_proc.json"
+# docker exec -it <container_id> /bin/bash -c "cd /home/dlstreamer/webrtc_demo && python python_client.py --model /home/dlstreamer/models/your_model.xml --model-proc /home/dlstreamer/models/your_model_proc.json"
