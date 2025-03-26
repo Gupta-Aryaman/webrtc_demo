@@ -2,3 +2,6 @@ websockets
 aiortc
 fastapi
 uvicorn
+numpy
+av
+opencv-python

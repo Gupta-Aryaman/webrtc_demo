@@ -28,6 +28,8 @@ parser = argparse.ArgumentParser(description='Python WebRTC client')
 parser.add_argument('--source', default='test_pattern', help='Video source (test_pattern, file path, camera index, or rtsp_pipeline)')
 parser.add_argument('--model', default='', help='Path to the model for DL Streamer')
 parser.add_argument('--model-proc', default='', help='Path to the model_proc file for DL Streamer')
+parser.add_argument('--rtsp-url', default='rtsp://localhost:8554/input_stream', help='RTSP URL for streaming')
+parser.add_argument('--server-url', default='ws://localhost:8080/ws', help='WebSocket URL for the signaling server')
 args = parser.parse_args()
 
 # Configure logging
@@ -295,7 +297,7 @@ def create_peer_connection():
         logger.info("Using test pattern as video source")
     elif args.source == 'rtsp_pipeline':
         # Use the DL Streamer pipeline with RTSP input
-        rtsp_url = "rtsp://localhost:8554/input_stream"
+        rtsp_url = args.rtsp_url
         video_track = GStreamerTrack(
             rtsp_url=rtsp_url,
             model=args.model,
@@ -487,7 +489,7 @@ async def run():
     
     try:
         # Connect to the signaling server
-        signaling_server = "ws://localhost:8080/ws"  # Updated to use the FastAPI WebSocket endpoint
+        signaling_server = args.server_url  # Updated to use the command-line argument
         logger.info(f"Connecting to signaling server at {signaling_server}")
         
         ws = await websockets.connect(signaling_server)
