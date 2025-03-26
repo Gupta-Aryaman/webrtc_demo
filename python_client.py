@@ -162,7 +162,7 @@ def create_peer_connection():
 
 async def send_signaling_message(message):
     try:
-        if ws and ws.open:
+        if ws:
             await ws.send(json.dumps(message))
             logger.info(f"Sent signaling message: {message['type']}")
         else:
