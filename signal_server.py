@@ -87,58 +87,25 @@ async def start_client(
     model: str = "",
     model_proc: str = ""
 ):
-    global python_client_process
+    # Instead of starting the Python client, just return instructions
+    logger.info(f"Received request to start client with source: {source}, model: {model}, model_proc: {model_proc}")
     
-    try:
-        # Kill existing process if running
-        if python_client_process and python_client_process.poll() is None:
-            logger.info("Terminating existing Python client process")
-            python_client_process.terminate()
-            python_client_process = None
-        
-        # Start Python client as a subprocess
-        logger.info(f"Starting Python client process with source: {source}")
-        if model and model_proc:
-            logger.info(f"Using model: {model}, model_proc: {model_proc}")
-            
-        python_client_dir = os.path.dirname(os.path.abspath(__file__))
-        python_client_path = os.path.join(python_client_dir, "python_client.py")
-        
-        # Start the Python client with the specified parameters
-        cmd = [sys.executable, python_client_path]
-        
-        # Add source parameter
-        if source != 'test_pattern':
-            cmd.extend(['--source', source])
-            
-        # Add model parameters if provided
-        if model:
-            cmd.extend(['--model', model])
-        if model_proc:
-            cmd.extend(['--model-proc', model_proc])
-        
-        python_client_process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
-        )
-        
-        # Start a background task to log output from the Python client
-        background_tasks.add_task(log_python_client_output, python_client_process)
-        
-        return {
-            "status": "success",
-            "message": f"Python client started with source: {source}"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error starting Python client: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+    # Return instructions for running the client in Docker
+    docker_cmd = f"docker run -it --rm --network host -v /path/to/models:/home/dlstreamer/models -v $(pwd):/home/dlstreamer/webrtc_demo --user root --entrypoint /bin/bash intel/dlstreamer:latest -c \"cd /home/dlstreamer/webrtc_demo && pip install -r requirements.txt && python python_client.py --source {source}"
+    
+    if model:
+        docker_cmd += f" --model {model}"
+    if model_proc:
+        docker_cmd += f" --model-proc {model_proc}"
+    
+    docker_cmd += " --server-url ws://localhost:8080/ws\""
+    
+    return {
+        "status": "instructions",
+        "message": "To run the Python client in Docker, use the following command:",
+        "docker_command": docker_cmd,
+        "note": "The Python client should be run in the Docker container manually, not from the signaling server."
+    }
 
 # WebSocket endpoint for signaling
 @app.websocket("/ws")
