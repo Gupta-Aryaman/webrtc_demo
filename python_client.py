@@ -402,23 +402,41 @@ async def handle_candidate(data):
     if pc and pc.remoteDescription:
         logger.info(f"Processing received ICE candidate")
         try:
-            # In aiortc, the RTCIceCandidate constructor expects the candidate string
-            # without the 'candidate:' prefix that might be present in the browser's format
-            candidate_str = data["candidate"]
-            if candidate_str and candidate_str.startswith("candidate:"):
-                candidate_str = candidate_str[10:]  # Remove 'candidate:' prefix
-            
-            if candidate_str:
-                candidate = RTCIceCandidate(
-                    sdpMid=data["sdpMid"],
-                    sdpMLineIndex=data["sdpMLineIndex"],
-                    candidate=candidate_str
-                )
+            # The format of ICE candidates can vary between browser and aiortc
+            # Check if we have a complete candidate object or just the candidate string
+            if "candidate" in data:
+                candidate_str = data["candidate"]
                 
-                await pc.addIceCandidate(candidate)
-                logger.info("ICE candidate added successfully")
+                # If empty candidate, it means end of candidates
+                if not candidate_str:
+                    logger.info("Received end-of-candidates signal")
+                    return
+                
+                # Remove 'candidate:' prefix if present
+                if candidate_str and candidate_str.startswith("candidate:"):
+                    candidate_str = candidate_str[10:]
+                
+                # Create the ICE candidate with the correct parameters
+                if "sdpMid" in data and "sdpMLineIndex" in data:
+                    candidate = RTCIceCandidate(
+                        component=None,  # Let aiortc determine this
+                        foundation=None,  # Let aiortc determine this
+                        ip=None,          # Let aiortc determine this
+                        port=None,        # Let aiortc determine this
+                        priority=None,    # Let aiortc determine this
+                        protocol=None,    # Let aiortc determine this
+                        type=None,        # Let aiortc determine this
+                        sdpMid=data["sdpMid"],
+                        sdpMLineIndex=data["sdpMLineIndex"],
+                        candidate=candidate_str
+                    )
+                    
+                    await pc.addIceCandidate(candidate)
+                    logger.info("ICE candidate added successfully")
+                else:
+                    logger.warning("Incomplete ICE candidate data, missing sdpMid or sdpMLineIndex")
             else:
-                logger.warning("Received empty ICE candidate, ignoring")
+                logger.warning("Received ICE candidate message without candidate field")
         except Exception as e:
             logger.error(f"Error adding ICE candidate: {e}")
     else:
@@ -439,7 +457,8 @@ async def handle_signaling():
                 elif data["type"] == "answer":
                     await handle_answer(data)
                 elif data["type"] == "candidate":
-                    await handle_candidate(data)
+                    # Use asyncio.create_task to avoid blocking the event loop
+                    asyncio.create_task(handle_candidate(data))
             except json.JSONDecodeError:
                 logger.error("Failed to parse JSON message")
             except KeyError:
@@ -455,7 +474,10 @@ async def handle_signaling():
         # Clean up if the signaling connection is lost
         if pc:
             logger.info("Closing peer connection due to signaling connection loss")
-            await pc.close()
+            try:
+                await pc.close()
+            except Exception as e:
+                logger.error(f"Error closing peer connection: {e}")
 
 async def create_offer():
     global pc, should_offer
