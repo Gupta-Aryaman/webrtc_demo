@@ -81,7 +81,12 @@ def log_python_client_output(process: subprocess.Popen):
 
 # Endpoint to start the Python client
 @app.get("/start_client")
-async def start_client(background_tasks: BackgroundTasks, source: str = "test_pattern"):
+async def start_client(
+    background_tasks: BackgroundTasks, 
+    source: str = "test_pattern",
+    model: str = "",
+    model_proc: str = ""
+):
     global python_client_process
     
     try:
@@ -93,13 +98,24 @@ async def start_client(background_tasks: BackgroundTasks, source: str = "test_pa
         
         # Start Python client as a subprocess
         logger.info(f"Starting Python client process with source: {source}")
+        if model and model_proc:
+            logger.info(f"Using model: {model}, model_proc: {model_proc}")
+            
         python_client_dir = os.path.dirname(os.path.abspath(__file__))
         python_client_path = os.path.join(python_client_dir, "python_client.py")
         
-        # Start the Python client with the specified source
+        # Start the Python client with the specified parameters
         cmd = [sys.executable, python_client_path]
+        
+        # Add source parameter
         if source != 'test_pattern':
             cmd.extend(['--source', source])
+            
+        # Add model parameters if provided
+        if model:
+            cmd.extend(['--model', model])
+        if model_proc:
+            cmd.extend(['--model-proc', model_proc])
         
         python_client_process = subprocess.Popen(
             cmd,

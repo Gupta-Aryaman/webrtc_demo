@@ -38,8 +38,20 @@
     <select id="videoSource">
       <option value="test_pattern">Test Pattern</option>
       <option value="0">Camera (First Device)</option>
+      <option value="rtsp_pipeline">DL Streamer RTSP Pipeline</option>
       <!-- Add more options as needed -->
     </select>
+  </div>
+  <div id="dlStreamerOptions" style="display: none; margin-top: 10px; padding: 10px; border: 1px solid #ddd; background: #f9f9f9;">
+    <h3>DL Streamer Options</h3>
+    <div>
+      <label for="modelPath">Model Path:</label>
+      <input type="text" id="modelPath" placeholder="Path to model file" style="width: 100%; margin-bottom: 10px;">
+    </div>
+    <div>
+      <label for="modelProcPath">Model Proc Path:</label>
+      <input type="text" id="modelProcPath" placeholder="Path to model_proc file" style="width: 100%; margin-bottom: 10px;">
+    </div>
   </div>
   <div id="log"></div>
 
@@ -241,26 +253,49 @@
     // Initialize the connections
     ws = initWebSocket();
     
+    // Show/hide DL Streamer options based on video source selection
+    videoSourceSelect.addEventListener('change', function() {
+      const dlStreamerOptions = document.getElementById('dlStreamerOptions');
+      if (this.value === 'rtsp_pipeline') {
+        dlStreamerOptions.style.display = 'block';
+      } else {
+        dlStreamerOptions.style.display = 'none';
+      }
+    });
+    
     // Start Python client button handler
     startPythonClientButton.addEventListener('click', async () => {
-      const videoSource = videoSourceSelect.value;
-      updateStatus(`Starting Python client with source: ${videoSource}...`);
-      
       try {
-        // Updated to use the FastAPI endpoint (port remains 8080)
-        const response = await fetch(`http://localhost:8080/start_client?source=${encodeURIComponent(videoSource)}`);
+        const source = videoSourceSelect.value;
+        
+        // Build the URL with parameters
+        let url = `http://localhost:8080/start_client?source=${encodeURIComponent(source)}`;
+        
+        // Add model parameters if using DL Streamer pipeline
+        if (source === 'rtsp_pipeline') {
+          const modelPath = document.getElementById('modelPath').value;
+          const modelProcPath = document.getElementById('modelProcPath').value;
+          
+          if (modelPath) {
+            url += `&model=${encodeURIComponent(modelPath)}`;
+          }
+          if (modelProcPath) {
+            url += `&model_proc=${encodeURIComponent(modelProcPath)}`;
+          }
+        }
+        
+        // Send request to start the Python client
+        log(`Starting Python client with source: ${source}`);
+        const response = await fetch(url);
         const data = await response.json();
         
         if (data.status === 'success') {
-          updateStatus(`Python client started successfully: ${data.message}`);
-          log('Python client started, waiting for connection...', 'success');
+          log(`Python client started: ${data.message}`, 'success');
         } else {
-          updateStatus(`Failed to start Python client: ${data.message}`);
-          log(`Error starting Python client: ${data.message}`, 'error');
+          log(`Failed to start Python client: ${data.message}`, 'error');
         }
-      } catch (error) {
-        updateStatus(`Error starting Python client: ${error.message}`);
-        log(`Error starting Python client: ${error.message}`, 'error');
+      } catch (e) {
+        log(`Error starting Python client: ${e.message}`, 'error');
       }
     });
     

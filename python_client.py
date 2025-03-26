@@ -8,12 +8,26 @@ import fractions
 import time
 import threading
 import argparse
+import gi
+import numpy as np
+from av import VideoFrame
+from queue import Queue
+from threading import Thread
+
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStreamTrack
 from aiortc.contrib.media import MediaBlackhole, MediaPlayer
 
+# Initialize GStreamer
+Gst.init(None)
+
 # Parse command-line arguments
 parser = argparse.ArgumentParser(description='Python WebRTC client')
-parser.add_argument('--source', default='test_pattern', help='Video source (test_pattern, file path, or camera index)')
+parser.add_argument('--source', default='test_pattern', help='Video source (test_pattern, file path, camera index, or rtsp_pipeline)')
+parser.add_argument('--model', default='', help='Path to the model for DL Streamer')
+parser.add_argument('--model-proc', default='', help='Path to the model_proc file for DL Streamer')
 args = parser.parse_args()
 
 # Configure logging
@@ -105,6 +119,156 @@ class VideoFileTrack(MediaStreamTrack):
         frame.time_base = time_base
         return frame
 
+class GStreamerTrack(MediaStreamTrack):
+    """A video stream track that uses GStreamer to run DL Streamer pipeline and stream the output via WebRTC."""
+    kind = "video"
+
+    def __init__(self, rtsp_url, model=None, model_proc=None):
+        super().__init__()
+        self._frame_counter = 0
+        self._start_time = time.time()
+        self.rtsp_url = rtsp_url
+        self.model = model
+        self.model_proc = model_proc
+        self.frame_queue = Queue(maxsize=30)  # Buffer for frames
+        
+        # Create and start the GStreamer pipeline in a separate thread
+        self.pipeline_thread = Thread(target=self._run_pipeline)
+        self.pipeline_thread.daemon = True
+        self.pipeline_thread.start()
+        
+        logger.info(f"GStreamerTrack initialized with RTSP URL: {rtsp_url}")
+        if model and model_proc:
+            logger.info(f"Using model: {model}, model_proc: {model_proc}")
+    
+    def _run_pipeline(self):
+        try:
+            # Create a GStreamer pipeline that will run inference and then output frames to our queue
+            pipeline_str = self._create_pipeline_string()
+            logger.info(f"Starting GStreamer pipeline: {pipeline_str}")
+            
+            # Create the pipeline
+            self.pipeline = Gst.parse_launch(pipeline_str)
+            
+            # Get the appsink element to retrieve frames
+            self.appsink = self.pipeline.get_by_name("appsink")
+            self.appsink.set_property("emit-signals", True)
+            self.appsink.connect("new-sample", self._on_new_sample)
+            
+            # Create a GLib main loop to run the GStreamer pipeline
+            self.loop = GLib.MainLoop()
+            
+            # Add a bus watch to handle pipeline messages
+            bus = self.pipeline.get_bus()
+            bus.add_signal_watch()
+            bus.connect("message", self._on_bus_message)
+            
+            # Start the pipeline
+            self.pipeline.set_state(Gst.State.PLAYING)
+            
+            # Run the GLib main loop
+            self.loop.run()
+        except Exception as e:
+            logger.error(f"Error in GStreamer pipeline: {e}")
+    
+    def _create_pipeline_string(self):
+        # Base pipeline with RTSP source
+        pipeline = f"rtspsrc location={self.rtsp_url} protocols=tcp ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert"
+        
+        # Add inference elements if model is provided
+        if self.model and self.model_proc:
+            pipeline += f" ! gvadetect model={self.model} model_proc={self.model_proc} device=CPU"
+            pipeline += " ! gvafpscounter interval=1"
+            pipeline += " ! gvapython module=assets/scripts/zone_detection.py"
+            pipeline += " ! gvametaconvert ! gvawatermark"
+        
+        # Add appsink to capture frames for WebRTC
+        pipeline += " ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink max-buffers=1 drop=true sync=false"
+        
+        return pipeline
+    
+    def _on_new_sample(self, appsink):
+        sample = appsink.pull_sample()
+        if sample:
+            buffer = sample.get_buffer()
+            caps = sample.get_caps()
+            caps_structure = caps.get_structure(0)
+            
+            # Get width and height from caps
+            width = caps_structure.get_value("width")
+            height = caps_structure.get_value("height")
+            
+            # Extract buffer data
+            success, map_info = buffer.map(Gst.MapFlags.READ)
+            if success:
+                # Create numpy array from buffer data
+                frame_data = np.ndarray(
+                    shape=(height, width, 3),
+                    dtype=np.uint8,
+                    buffer=map_info.data
+                )
+                
+                # Put the frame in the queue for the WebRTC track to consume
+                try:
+                    # Make a copy of the frame data to avoid issues with buffer being reused
+                    self.frame_queue.put(frame_data.copy(), block=False)
+                except:
+                    # Queue is full, drop the frame
+                    pass
+                
+                # Unmap the buffer
+                buffer.unmap(map_info)
+            
+        return Gst.FlowReturn.OK
+    
+    def _on_bus_message(self, bus, message):
+        t = message.type
+        if t == Gst.MessageType.EOS:
+            logger.info("End of stream")
+            self.loop.quit()
+        elif t == Gst.MessageType.ERROR:
+            err, debug = message.parse_error()
+            logger.error(f"GStreamer error: {err}, {debug}")
+            self.loop.quit()
+    
+    async def next_timestamp(self):
+        self._frame_counter += 1
+        # Use a standard 30fps timing
+        pts = int(self._frame_counter * 90000 / 30)  # 90kHz clock rate
+        time_base = fractions.Fraction(1, 90000)  # standard time base for video
+        return pts, time_base
+    
+    async def recv(self):
+        try:
+            # Try to get a frame from the queue with a timeout
+            frame_data = None
+            try:
+                frame_data = self.frame_queue.get(timeout=1.0)
+            except:
+                # If no frame is available, create a blank frame
+                height, width = 480, 640
+                frame_data = np.zeros((height, width, 3), dtype=np.uint8)
+                # Add text indicating waiting for video
+                # This would require additional code with OpenCV
+            
+            # Create a VideoFrame from the numpy array
+            pts, time_base = await self.next_timestamp()
+            frame = VideoFrame.from_ndarray(frame_data, format="bgr24")
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
+            
+        except Exception as e:
+            logger.error(f"Error in GStreamerTrack.recv: {e}")
+            # Return a blank frame in case of error
+            height, width = 480, 640
+            frame_data = np.zeros((height, width, 3), dtype=np.uint8)
+            pts, time_base = await self.next_timestamp()
+            frame = VideoFrame.from_ndarray(frame_data, format="bgr24")
+            frame.pts = pts
+            frame.time_base = time_base
+            return frame
+
 # Global variables
 pc = None
 ws = None
@@ -124,11 +288,30 @@ def create_peer_connection():
     pc = RTCPeerConnection()
     logger.info("Created new peer connection")
     
-    # Add a video track to the connection
-    # Use the source specified in command-line arguments
-    video_track = VideoFileTrack(source=args.source)
+    # Add a video track to the connection based on the source
+    if args.source == 'test_pattern':
+        # Use the test pattern video track
+        video_track = VideoFileTrack(source='test_pattern')
+        logger.info("Using test pattern as video source")
+    elif args.source == 'rtsp_pipeline':
+        # Use the DL Streamer pipeline with RTSP input
+        rtsp_url = "rtsp://localhost:8554/input_stream"
+        video_track = GStreamerTrack(
+            rtsp_url=rtsp_url,
+            model=args.model,
+            model_proc=args.model_proc
+        )
+        logger.info(f"Using DL Streamer pipeline with RTSP source: {rtsp_url}")
+    elif args.source.startswith('rtsp://'):
+        # Direct RTSP URL without DL Streamer
+        video_track = GStreamerTrack(rtsp_url=args.source)
+        logger.info(f"Using direct RTSP source: {args.source}")
+    else:
+        # Use a file or camera as source
+        video_track = VideoFileTrack(source=args.source)
+        logger.info(f"Using file/camera as video source: {args.source}")
+    
     pc.addTrack(video_track)
-    logger.info(f"Added video track to connection with source: {args.source}")
     
     # Set up event handlers
     @pc.on("icecandidate")
